@@ -14,6 +14,12 @@
       "port": 4000
     },
     {
+      "name": "Registrar (standalone)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["registrar/index.js"],
+      "port": 4001
+    },
+    {
       "name": "Chatwoot UI",
       "runtimeExecutable": "docker",
       "runtimeArgs": ["compose", "up", "postgres", "redis", "chatwoot", "sidekiq"],
