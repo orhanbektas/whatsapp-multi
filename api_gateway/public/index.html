@@ -137,6 +137,63 @@ code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}
 <script>
 let curPhone = null;
 
+function getPanelToken() {
+  return localStorage.getItem('panelToken') || '';
+}
+
+function ensurePanelToken() {
+  const urlToken = new URLSearchParams(location.search).get('panelToken');
+  if (urlToken) {
+    localStorage.setItem('panelToken', urlToken);
+    if (location.pathname !== '/' || location.search) {
+      history.replaceState({}, '', '/');
+    }
+    return;
+  }
+
+  if (!getPanelToken()) {
+    const token = prompt('Panel token girin (PANEL_TOKEN):');
+    if (token && token.trim()) {
+      localStorage.setItem('panelToken', token.trim());
+    }
+  }
+}
+
+function panelHeaders(extra = {}) {
+  const headers = { ...extra };
+  const token = getPanelToken();
+  if (token) headers['x-panel-token'] = token;
+  return headers;
+}
+
+async function apiFetch(url, options = {}) {
+  const opts = { ...options };
+  opts.headers = panelHeaders(options.headers || {});
+
+  const response = await fetch(url, opts);
+  let data = {};
+  try { data = await response.json(); } catch {}
+
+  if (!response.ok) {
+    const message = data.error || data.message || `HTTP ${response.status}`;
+    if (response.status === 401) {
+      localStorage.removeItem('panelToken');
+    }
+    throw new Error(message);
+  }
+
+  return data;
+}
+
+ensurePanelToken();
+
+window.addEventListener('unhandledrejection', (event) => {
+  const msg = event?.reason?.message || String(event.reason || 'Bilinmeyen hata');
+  if (msg.toLowerCase().includes('401')) {
+    localStorage.removeItem('panelToken');
+  }
+});
+
 function tab(name) {
   document.querySelectorAll('.tab').forEach((t,i) => {
     t.classList.toggle('active', ['register','instances','qr'][i] === name);
@@ -149,7 +206,7 @@ function tab(name) {
 async function checkAdb() {
   document.getElementById('adbText').textContent = 'Test ediliyor...';
   try {
-    const d = await (await fetch('/panel/register/adb-status')).json();
+    const d = await apiFetch('/panel/register/adb-status');
     const dot = document.getElementById('adbDot');
     const txt = document.getElementById('adbText');
     if (d.ready) { dot.className='dot dot-green'; txt.textContent='BlueStacks bağlı'; }
@@ -167,6 +224,7 @@ async function startReg() {
   const phone = document.getElementById('regPhone').value.trim();
   const proxy = document.getElementById('regProxy').value.trim();
   if (!phone) return alert('Numara girin!');
+  ensurePanelToken();
   setResult('r1','<div class="alert info">BlueStacks\'te WhatsApp başlatılıyor... (30–60 sn)</div>');
   animBar('p1','b1', 80, 50000);
   try {
@@ -215,7 +273,7 @@ async function loadInstances() {
   const el = document.getElementById('instanceList');
   el.innerHTML='<div class="empty">Yükleniyor...</div>';
   try {
-    const list = await (await fetch('/panel/instances')).json();
+    const list = await apiFetch('/panel/instances');
     if (!list.length) { el.innerHTML='<div class="empty">Kayıtlı numara yok.</div>'; return; }
     el.innerHTML=`<table><thead><tr><th>Instance</th><th>Durum</th><th></th></tr></thead><tbody>
       ${list.map(i=>`<tr>
@@ -237,8 +295,12 @@ function dotCls(s) {
 
 async function delInstance(name) {
   if (!confirm(`"${name}" silinsin mi?`)) return;
-  await fetch(`/panel/instances/${name}`,{method:'DELETE'});
-  loadInstances();
+  try {
+    await apiFetch(`/panel/instances/${name}`, { method: 'DELETE' });
+    loadInstances();
+  } catch (e) {
+    alert(e.message);
+  }
 }
 
 async function createQr() {
@@ -249,7 +311,7 @@ async function createQr() {
   try {
     await post('/panel/instances',{instanceName:name});
     await sleep(2000);
-    const d = await (await fetch(`/panel/instances/${name}/qr`)).json();
+    const d = await apiFetch(`/panel/instances/${name}/qr`);
     if (d.base64) {
       el.innerHTML=`<p style="color:#8b949e;font-size:13px;margin-bottom:10px">
         WhatsApp → Bağlı Cihazlar → Cihaz Ekle → QR Tara</p>

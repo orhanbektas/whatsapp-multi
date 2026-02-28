@@ -17,8 +17,8 @@ services:
     container_name: wm_postgres
     restart: always
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme123}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: chatwoot
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -35,13 +35,13 @@ services:
     image: redis:7-alpine
     container_name: wm_redis
     restart: always
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redispass123}
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     volumes:
       - redis_data:/data
     networks:
       - wm_net
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispass123}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -53,9 +53,9 @@ services:
     ports:
       - "8080:8080"
     environment:
-      SERVER_URL: ${EVOLUTION_SERVER_URL:-http://localhost:8080}
+      SERVER_URL: ${EVOLUTION_SERVER_URL:?EVOLUTION_SERVER_URL is required}
       AUTHENTICATION_TYPE: apikey
-      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-evokey_changeme}
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?EVOLUTION_API_KEY is required}
       AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: "true"
       QRCODE_LIMIT: "30"
       QRCODE_EXPIRATION_TIME: "60"
@@ -64,16 +64,16 @@ services:
       LOG_COLOR: "false"
       DATABASE_ENABLED: "true"
       DATABASE_PROVIDER: postgresql
-      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/evolution
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/evolution
       DATABASE_SAVE_DATA_INSTANCE: "true"
       DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
       DATABASE_SAVE_MESSAGE_UPDATE: "true"
       DATABASE_SAVE_DATA_CONTACTS: "true"
       DATABASE_SAVE_DATA_CHATS: "true"
       REDIS_ENABLED: "true"
-      REDIS_URI: redis://:${REDIS_PASSWORD:-redispass123}@redis:6379
+      REDIS_URI: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       CACHE_REDIS_ENABLED: "true"
-      CACHE_REDIS_URI: redis://:${REDIS_PASSWORD:-redispass123}@redis:6379
+      CACHE_REDIS_URI: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       CACHE_REDIS_PREFIX_KEY: evolution
       WEBHOOK_GLOBAL_ENABLED: "false"
     volumes:
@@ -90,13 +90,13 @@ services:
     image: chatwoot/chatwoot:latest
     container_name: wm_chatwoot
     restart: always
-    profiles: ["chatwoot"]        # docker compose --profile chatwoot up ile başlatılır
+    profiles: ["chatwoot"]
     ports:
       - "3000:3000"
     environment:
-      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY:-chatwoot_secret_changeme}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/chatwoot
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass123}@redis:6379
+      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY:?CHATWOOT_SECRET_KEY is required}
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/chatwoot
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       RAILS_ENV: production
       NODE_ENV: production
       INSTALLATION_ENV: docker
@@ -117,11 +117,11 @@ services:
     image: chatwoot/chatwoot:latest
     container_name: wm_sidekiq
     restart: always
-    profiles: ["chatwoot"]        # docker compose --profile chatwoot up ile başlatılır
+    profiles: ["chatwoot"]
     environment:
-      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY:-chatwoot_secret_changeme}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/chatwoot
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass123}@redis:6379
+      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY:?CHATWOOT_SECRET_KEY is required}
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/chatwoot
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       RAILS_ENV: production
       NODE_ENV: production
       FRONTEND_URL: ${CHATWOOT_URL:-http://localhost:3000}
@@ -142,18 +142,19 @@ services:
     container_name: wm_registrar
     restart: always
     ports:
-      - "4001:4001"
+      - "${REGISTRAR_PUBLISHED_PORT:-127.0.0.1:4001}:4001"
     environment:
       EVOLUTION_URL: http://evolution:8080
-      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:-evokey_changeme}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:?EVOLUTION_API_KEY is required}
+      REGISTRAR_INTERNAL_TOKEN: ${REGISTRAR_INTERNAL_TOKEN:?REGISTRAR_INTERNAL_TOKEN is required}
+      REQUEST_TIMEOUT_MS: ${REQUEST_TIMEOUT_MS:-30000}
+      REGISTRATION_SESSION_TTL_MS: ${REGISTRATION_SESSION_TTL_MS:-900000}
       PORT: 4001
-      # BlueStacks ADB bağlantısı (Windows host üzerinde BlueStacks çalışır)
       ADB_HOST: ${ADB_HOST:-host.docker.internal}
       ADB_PORT: ${ADB_PORT:-5555}
-      # WhatsApp paketi: com.whatsapp.w4b (Business) veya com.whatsapp (normal)
       WA_PACKAGE: ${WA_PACKAGE:-com.whatsapp}
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # Linux için gerekli, Windows Docker Desktop'ta otomatik
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./registrar:/app
     working_dir: /app
@@ -171,8 +172,13 @@ services:
       - "4000:4000"
     environment:
       EVOLUTION_URL: http://evolution:8080
-      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:-evokey_changeme}
-      GATEWAY_API_KEYS: ${GATEWAY_API_KEYS:-key_changeme}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:?EVOLUTION_API_KEY is required}
+      GATEWAY_API_KEYS: ${GATEWAY_API_KEYS:?GATEWAY_API_KEYS is required}
+      PANEL_TOKEN: ${PANEL_TOKEN:-}
+      PANEL_BASIC_USER: ${PANEL_BASIC_USER:-}
+      PANEL_BASIC_PASS: ${PANEL_BASIC_PASS:-}
+      REGISTRAR_INTERNAL_TOKEN: ${REGISTRAR_INTERNAL_TOKEN:?REGISTRAR_INTERNAL_TOKEN is required}
+      REQUEST_TIMEOUT_MS: ${REQUEST_TIMEOUT_MS:-30000}
       REGISTRAR_URL: http://registrar:4001
       PORT: 4000
     volumes:

@@ -1,89 +1,264 @@
 /**
  * WhatsApp Registrar — BlueStacks ADB Otomasyon
- *
- * Akış:
- *  1. POST /register/start  → BlueStacks'te WhatsApp açılır, numara girilir, SMS gönderilir
- *  2. POST /register/verify → SMS kodu girilir, kayıt tamamlanır,
- *                             Evolution API instance oluşturulur + pairing code ile bağlanır
  */
 
 const express = require('express');
-const axios   = require('axios');
-const { exec } = require('child_process');
+const axios = require('axios');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { parsePhoneNumber } = require('libphonenumber-js');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '256kb' }));
 
-const EVOLUTION_URL     = process.env.EVOLUTION_URL     || 'http://evolution:8080';
+const EVOLUTION_URL = process.env.EVOLUTION_URL || 'http://evolution:8080';
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
-const PORT              = process.env.PORT              || 4001;
-const ADB_HOST          = process.env.ADB_HOST          || 'host.docker.internal';
-const ADB_PORT          = process.env.ADB_PORT          || '5555';
-const DEVICE            = `${ADB_HOST}:${ADB_PORT}`;
-// 'com.whatsapp' → normal | 'com.whatsapp.w4b' → WhatsApp Business
-const WA_PACKAGE        = process.env.WA_PACKAGE || 'com.whatsapp';
+const REGISTRAR_INTERNAL_TOKEN = process.env.REGISTRAR_INTERNAL_TOKEN || '';
+const PORT = Number(process.env.PORT || 4001);
+const ADB_HOST = process.env.ADB_HOST || 'host.docker.internal';
+const ADB_PORT = String(process.env.ADB_PORT || '5555');
+const WA_PACKAGE = process.env.WA_PACKAGE || 'com.whatsapp';
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
+const SESSION_TTL_MS = Number(process.env.REGISTRATION_SESSION_TTL_MS || 15 * 60 * 1000);
 
-// Aktif oturumlar: normalPhone → { state, countryCode, nationalNumber, instanceName }
+if (!EVOLUTION_API_KEY) throw new Error('EVOLUTION_API_KEY zorunludur.');
+if (!REGISTRAR_INTERNAL_TOKEN) throw new Error('REGISTRAR_INTERNAL_TOKEN zorunludur.');
+if (!/^\d{2,5}$/.test(ADB_PORT)) throw new Error('ADB_PORT geçerli sayısal port olmalıdır.');
+if (!/^[a-zA-Z0-9_.]+$/.test(WA_PACKAGE)) throw new Error('WA_PACKAGE geçersiz karakter içeriyor.');
+
+const DEVICE = `${ADB_HOST}:${ADB_PORT}`;
 const sessions = {};
+let deviceLock = null;
 
-// ── Yardımcı fonksiyonlar ─────────────────────────────────────────────────────
+const evoClient = axios.create({
+  baseURL: EVOLUTION_URL,
+  timeout: REQUEST_TIMEOUT_MS,
+  headers: { apikey: EVOLUTION_API_KEY },
+});
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-async function adb(cmd) {
-  const { stdout } = await execAsync(`adb -s ${DEVICE} ${cmd}`, { timeout: 30000 });
-  return stdout.trim();
+function sanitizeErrorMessage(err, fallback = 'İşlem başarısız oldu.') {
+  if (err?.code === 'ECONNABORTED') return 'İşlem zaman aşımına uğradı.';
+  return err?.response?.data?.error || err?.response?.data?.message || err?.message || fallback;
 }
 
-async function adbShell(cmd) {
-  return adb(`shell ${cmd}`);
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length <= 4) return '****';
+  return `${digits.slice(0, 2)}****${digits.slice(-2)}`;
 }
 
-/** BlueStacks'e bağlan, true/false döner */
+function hasShellMetaChars(input) {
+  return /[;&|`$<>\\]/.test(String(input || ''));
+}
+
+function isValidHost(host) {
+  if (!host || host.length > 253) return false;
+  if (/\s/.test(host)) return false;
+  const hostRegex = /^(localhost|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|([a-zA-Z0-9-]+\.)*[a-zA-Z0-9-]+)$/;
+  return hostRegex.test(host);
+}
+
+function parseProxyInput(proxyStr) {
+  if (!proxyStr) return null;
+  if (typeof proxyStr !== 'string') return { error: 'proxy metin olmalıdır.' };
+  const raw = proxyStr.trim();
+  if (!raw) return null;
+  if (raw.length > 200) return { error: 'proxy çok uzun.' };
+  if (hasShellMetaChars(raw)) return { error: 'proxy geçersiz karakter içeriyor.' };
+
+  let host;
+  let port;
+
+  if (raw.includes('://')) {
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      return { error: 'proxy URL formatı geçersiz.' };
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return { error: 'proxy protokolü yalnızca http/https olabilir.' };
+    }
+    host = parsed.hostname;
+    port = parsed.port || '8080';
+  } else {
+    const parts = raw.split(':');
+    if (parts.length !== 2) return { error: 'proxy formatı host:port olmalıdır.' };
+    [host, port] = parts;
+  }
+
+  if (!isValidHost(host)) return { error: 'proxy host geçersiz.' };
+  if (!/^\d+$/.test(String(port))) return { error: 'proxy port sayısal olmalıdır.' };
+
+  const numericPort = Number(port);
+  if (numericPort < 1 || numericPort > 65535) return { error: 'proxy port 1-65535 aralığında olmalıdır.' };
+
+  return { host, port: String(numericPort) };
+}
+
+async function runCommand(bin, args, timeout = REQUEST_TIMEOUT_MS) {
+  const { stdout } = await execFileAsync(bin, args, {
+    timeout,
+    maxBuffer: 1024 * 1024,
+  });
+  return String(stdout || '').trim();
+}
+
+async function adb(args, timeout = REQUEST_TIMEOUT_MS) {
+  if (!Array.isArray(args)) throw new Error('ADB komutu argüman listesi olmalıdır.');
+  return runCommand('adb', ['-s', DEVICE, ...args], timeout);
+}
+
+async function adbShell(args, timeout = REQUEST_TIMEOUT_MS) {
+  if (!Array.isArray(args)) throw new Error('ADB shell komutu argüman listesi olmalıdır.');
+  return adb(['shell', ...args], timeout);
+}
+
 async function adbConnect() {
   try {
-    const { stdout } = await execAsync(`adb connect ${DEVICE}`, { timeout: 10000 });
-    return stdout.includes('connected');
-  } catch { return false; }
+    const stdout = await runCommand('adb', ['connect', DEVICE], 10000);
+    return /connected|already connected/i.test(stdout);
+  } catch {
+    return false;
+  }
 }
 
-/** Cihazın erişilebilir olduğunu doğrula */
 async function deviceReady() {
   try {
-    const out = await adb('get-state');
+    const out = await adb(['get-state']);
     return out.trim() === 'device';
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
-// ── UIAutomator yardımcıları ──────────────────────────────────────────────────
+function parsePhone(phone) {
+  if (!phone || typeof phone !== 'string') return null;
+  const normalizedInput = phone.trim();
+  if (!/^\+?[1-9]\d{7,14}$/.test(normalizedInput)) return null;
 
-/** Ekran XML'ini çek */
+  const withPlus = normalizedInput.startsWith('+') ? normalizedInput : `+${normalizedInput}`;
+  try {
+    const parsed = parsePhoneNumber(withPlus);
+    if (!parsed || !parsed.isValid()) return null;
+    return {
+      normalPhone: parsed.number.replace('+', ''),
+      countryCode: String(parsed.countryCallingCode),
+      nationalNumber: String(parsed.nationalNumber),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isValidCode(code) {
+  return typeof code === 'string' && /^\d{4,8}$/.test(code.trim());
+}
+
+function createRateLimiter({ windowMs, max }) {
+  const bucket = new Map();
+  return (req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const item = bucket.get(ip) || { count: 0, resetAt: now + windowMs };
+
+    if (now > item.resetAt) {
+      item.count = 0;
+      item.resetAt = now + windowMs;
+    }
+
+    item.count += 1;
+    bucket.set(ip, item);
+
+    if (item.count > max) {
+      return res.status(429).json({ error: 'Çok fazla istek. Lütfen daha sonra tekrar deneyin.' });
+    }
+
+    next();
+  };
+}
+
+function getSession(phone) {
+  const s = sessions[phone];
+  if (!s) return null;
+  if (Date.now() > s.expiresAt) {
+    delete sessions[phone];
+    if (deviceLock?.phone === phone) deviceLock = null;
+    return null;
+  }
+  return s;
+}
+
+function setSession(phone, patch) {
+  sessions[phone] = { ...sessions[phone], ...patch, updatedAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS };
+}
+
+function finalizeSession(phone, state) {
+  const s = sessions[phone];
+  if (!s) return;
+  s.state = state;
+  s.updatedAt = Date.now();
+  s.expiresAt = Date.now() + 60 * 1000;
+}
+
+function acquireLock(phone, phase) {
+  if (deviceLock && deviceLock.phone !== phone) {
+    return false;
+  }
+  deviceLock = {
+    phone,
+    phase,
+    acquiredAt: Date.now(),
+    expiresAt: Date.now() + SESSION_TTL_MS,
+  };
+  return true;
+}
+
+function refreshLock(phone, phase) {
+  if (!deviceLock || deviceLock.phone !== phone) return;
+  deviceLock.phase = phase;
+  deviceLock.expiresAt = Date.now() + SESSION_TTL_MS;
+}
+
+function releaseLock(phone) {
+  if (deviceLock?.phone === phone) {
+    deviceLock = null;
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [phone, session] of Object.entries(sessions)) {
+    if (now > session.expiresAt) {
+      delete sessions[phone];
+      if (deviceLock?.phone === phone) deviceLock = null;
+    }
+  }
+  if (deviceLock && now > deviceLock.expiresAt) deviceLock = null;
+}, 15000);
+
 async function getUiXml() {
   try {
-    await adbShell('uiautomator dump /sdcard/ui.xml');
+    await adbShell(['uiautomator', 'dump', '/sdcard/ui.xml']);
     await sleep(300);
-    return adbShell('cat /sdcard/ui.xml');
-  } catch { return ''; }
+    return adbShell(['cat', '/sdcard/ui.xml']);
+  } catch {
+    return '';
+  }
 }
 
-/**
- * XML içinde text / content-desc / resource-id ile element bul,
- * bounds orta noktasını döndür: { x, y } veya null
- */
 function findCenter(xml, searches) {
   for (const [attr, val] of Object.entries(searches)) {
-    const esc = val.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Önce: attribute="value" ... bounds="[x1,y1][x2,y2]"
+    const esc = String(val).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const re1 = new RegExp(`${attr}="${esc}"[^>]*bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"`, 'i');
-    const m1  = xml.match(re1);
+    const m1 = xml.match(re1);
     if (m1) return center(m1);
 
-    // Sonra: bounds önce gelip attribute sonra gelebilir (farklı sıra)
     const re2 = new RegExp(`bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"[^>]*${attr}="${esc}"`, 'i');
-    const m2  = xml.match(re2);
+    const m2 = xml.match(re2);
     if (m2) return center(m2);
   }
   return null;
@@ -91,22 +266,20 @@ function findCenter(xml, searches) {
 
 function center(m) {
   return {
-    x: Math.floor((parseInt(m[1]) + parseInt(m[3])) / 2),
-    y: Math.floor((parseInt(m[2]) + parseInt(m[4])) / 2),
+    x: Math.floor((parseInt(m[1], 10) + parseInt(m[3], 10)) / 2),
+    y: Math.floor((parseInt(m[2], 10) + parseInt(m[4], 10)) / 2),
   };
 }
 
-/** Element varsa tıkla, yoksa false döndür */
 async function tapIf(searches) {
   const xml = await getUiXml();
-  const pos  = findCenter(xml, searches);
+  const pos = findCenter(xml, searches);
   if (!pos) return false;
-  await adbShell(`input tap ${pos.x} ${pos.y}`);
+  await adbShell(['input', 'tap', String(pos.x), String(pos.y)]);
   await sleep(800);
   return true;
 }
 
-/** Element çıkana kadar bekle (max timeoutMs) */
 async function waitFor(searches, timeoutMs = 30000) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
@@ -117,42 +290,29 @@ async function waitFor(searches, timeoutMs = 30000) {
   return false;
 }
 
-/** Ekranda belirtilen metin var mı? */
-async function screenContains(text) {
-  const xml = await getUiXml();
-  return xml.toLowerCase().includes(text.toLowerCase());
-}
-
-// ── WhatsApp otomasyon adımları ───────────────────────────────────────────────
-
-/** WhatsApp'ı sıfırla ve başlat */
 async function resetAndLaunchWhatsApp() {
-  await adbShell(`am force-stop ${WA_PACKAGE}`).catch(() => {});
+  await adbShell(['am', 'force-stop', WA_PACKAGE]).catch(() => {});
   await sleep(500);
-  // Hata olursa (paket yüklü değil gibi) devam et
-  await adbShell(`pm clear ${WA_PACKAGE}`).catch(() => {});
+  await adbShell(['pm', 'clear', WA_PACKAGE]).catch(() => {});
   await sleep(1000);
-  await adbShell(`monkey -p ${WA_PACKAGE} -c android.intent.category.LAUNCHER 1`);
+  await adbShell(['monkey', '-p', WA_PACKAGE, '-c', 'android.intent.category.LAUNCHER', '1']);
   await sleep(4000);
 }
 
-/** Karşılama ekranlarını geç (Türkçe + İngilizce) */
 async function dismissWelcomeScreens() {
   const buttons = [
-    // Türkçe
     { text: 'Kabul et ve devam et' },
     { text: 'KABUL ET VE DEVAM ET' },
     { text: 'Kabul et' },
     { text: 'Devam et' },
     { text: 'Tamam' },
     { text: 'İzin ver' },
-    // İngilizce
     { text: 'AGREE AND CONTINUE' }, { text: 'Agree and continue' },
     { text: 'AGREE' }, { text: 'Agree' },
     { text: 'Continue' }, { text: 'CONTINUE' },
     { text: 'OK' }, { text: 'Allow' },
   ];
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 8; i += 1) {
     let clicked = false;
     for (const b of buttons) {
       if (await tapIf(b)) { clicked = true; await sleep(2000); break; }
@@ -161,30 +321,21 @@ async function dismissWelcomeScreens() {
   }
 }
 
-/** Odaklanmış text alanını güvenilir şekilde temizle (CTRL+A adb'de güvenilir değil) */
 async function clearCurrentField(maxChars = 30) {
-  await adbShell('input keyevent KEYCODE_MOVE_END');
+  await adbShell(['input', 'keyevent', 'KEYCODE_MOVE_END']);
   await sleep(100);
-  for (let i = 0; i < maxChars; i++) {
-    await adbShell('input keyevent KEYCODE_DEL');
+  for (let i = 0; i < maxChars; i += 1) {
+    await adbShell(['input', 'keyevent', 'KEYCODE_DEL']);
     await sleep(20);
   }
 }
 
-/**
- * Ülke seçici picker'ı açar, calling code ile arar ve ilk sonucu seçer.
- * Örn: callingCode="27" → South Africa / Güney Afrika
- */
 async function selectCountryFromPicker(callingCode) {
   const opened = await tapIf({ 'resource-id': `${WA_PACKAGE}:id/registration_country` });
-  if (!opened) {
-    console.warn('[ADB] registration_country bulunamadı, ülke seçimi atlanıyor');
-    return false;
-  }
+  if (!opened) return false;
+
   await sleep(1500);
 
-  // Sağ üstteki arama ikonuna tıkla — önce content-desc ile dene,
-  // bulunamazsa ekran boyutuna göre koordinat hesapla
   const searchByAttr =
     await tapIf({ 'content-desc': 'Ara' })
     || await tapIf({ 'content-desc': 'Search' })
@@ -192,92 +343,66 @@ async function selectCountryFromPicker(callingCode) {
     || await tapIf({ 'resource-id': `${WA_PACKAGE}:id/menu_search` });
 
   if (!searchByAttr) {
-    // Koordinat yedek: ekran genişliğinin %95, yüksekliğin %4 (sağ üst köşe)
     try {
-      const sizeOut = await adbShell('wm size');
+      const sizeOut = await adbShell(['wm', 'size']);
       const m = sizeOut.match(/(\d+)x(\d+)/);
       if (m) {
-        const sx = Math.floor(parseInt(m[1]) * 0.95);
-        const sy = Math.floor(parseInt(m[2]) * 0.04);
-        console.log(`[ADB] Arama ikonu koordinatla tıklanıyor: (${sx}, ${sy})`);
-        await adbShell(`input tap ${sx} ${sy}`);
+        const sx = Math.floor(parseInt(m[1], 10) * 0.95);
+        const sy = Math.floor(parseInt(m[2], 10) * 0.04);
+        await adbShell(['input', 'tap', String(sx), String(sy)]);
       }
-    } catch (e) {
-      console.warn('[ADB] Ekran boyutu alınamadı:', e.message);
-    }
+    } catch {}
   }
+
   await sleep(800);
 
-  // Arama alanını odakla (bazı sürümlerde otomatik açılır)
   await tapIf({ 'resource-id': `${WA_PACKAGE}:id/search_src_text` })
     || await tapIf({ hint: 'Search' })
     || await tapIf({ hint: 'Ara' });
 
   await sleep(400);
   await clearCurrentField(10);
-  await adbShell(`input text "${callingCode}"`);
+  await adbShell(['input', 'text', callingCode]);
   await sleep(1500);
 
-  // Sonuç listesinden seç
   const xml = await getUiXml();
-  const pos = findCenter(xml, { text: `+${callingCode}` })
-           || findCenter(xml, { text: callingCode });
+  const pos = findCenter(xml, { text: `+${callingCode}` }) || findCenter(xml, { text: callingCode });
   if (pos) {
-    console.log(`[ADB] +${callingCode} bulundu, tıklanıyor: (${pos.x}, ${pos.y})`);
-    await adbShell(`input tap ${pos.x} ${pos.y}`);
+    await adbShell(['input', 'tap', String(pos.x), String(pos.y)]);
     await sleep(1000);
     return true;
   }
 
-  // Debug: XML'in ilgili parçasını logla
-  console.warn(`[ADB] +${callingCode} XML'de bulunamadı`);
-  const snippet = xml.replace(/<node /g, '\n<node ').substring(0, 3000);
-  console.warn('[ADB] Picker XML:\n', snippet);
-
-  // Son çare: Enter
-  await adbShell('input keyevent KEYCODE_ENTER');
+  await adbShell(['input', 'keyevent', 'KEYCODE_ENTER']);
   await sleep(1000);
   return true;
 }
 
-/**
- * Kayıt ekranında ülke kodunu ve numarayı gir.
- * UI dump element adları:
- *   - registration_country → ülke seçici dropdown (picker)
- *   - registration_phone   → ulusal numara alanı
- *   - registration_submit  → İLERİ butonu
- */
 async function enterPhoneNumber(countryCode, nationalNumber) {
-  // 1. Ülke kodunu picker'dan seç
   await selectCountryFromPicker(countryCode);
 
-  // 2. Numara alanına tıkla
   await tapIf({ 'resource-id': `${WA_PACKAGE}:id/registration_phone` })
     || await tapIf({ hint: 'Telefon numarası' })
     || await tapIf({ hint: 'Phone number' });
   await sleep(400);
 
-  // 3. Mevcut içeriği güvenilir şekilde temizle
   await clearCurrentField(20);
 
-  // 4. Ulusal numarayı yaz
   for (const digit of nationalNumber) {
-    await adbShell(`input text "${digit}"`);
+    await adbShell(['input', 'text', digit]);
     await sleep(80);
   }
   await sleep(300);
 }
 
-/** İleri / Sonraki butonuna bas */
 async function clickNext() {
-  return await tapIf({ 'resource-id': `${WA_PACKAGE}:id/registration_submit` })
-    || await tapIf({ text: 'İleri' })  || await tapIf({ text: 'Sonraki' })
-    || await tapIf({ text: 'Next' })   || await tapIf({ text: 'NEXT' })
-    || await tapIf({ text: 'Done' })   || await tapIf({ text: 'DONE' })
-    || await tapIf({ 'content-desc': 'Next' }) || await tapIf({ 'content-desc': 'İleri' });
+  return tapIf({ 'resource-id': `${WA_PACKAGE}:id/registration_submit` })
+    || tapIf({ text: 'İleri' }) || tapIf({ text: 'Sonraki' })
+    || tapIf({ text: 'Next' }) || tapIf({ text: 'NEXT' })
+    || tapIf({ text: 'Done' }) || tapIf({ text: 'DONE' })
+    || tapIf({ 'content-desc': 'Next' }) || tapIf({ 'content-desc': 'İleri' });
 }
 
-/** "Bu numara doğru mu?" onay diyaloğunu kabul et */
 async function confirmPhoneNumber() {
   await sleep(2000);
   await tapIf({ text: 'Tamam' }) || await tapIf({ text: 'Evet' })
@@ -285,33 +410,24 @@ async function confirmPhoneNumber() {
     || await tapIf({ text: 'Continue' }) || await tapIf({ text: 'Devam et' });
 }
 
-/** SMS doğrulama kodunu gir */
 async function enterSmsCode(code) {
   const digits = code.replace(/\D/g, '');
   const found = await tapIf({ 'resource-id': `${WA_PACKAGE}:id/verify_sms_code_input` })
     || await tapIf({ hint: 'Enter code' })
-    || await tapIf({ 'class': 'android.widget.EditText' });
+    || await tapIf({ class: 'android.widget.EditText' });
+
   await sleep(300);
-  // Her haneyi ayrı ayrı yaz (bazı sürümler 6 ayrı kutu kullanır)
   for (const d of digits) {
-    await adbShell(`input text "${d}"`);
+    await adbShell(['input', 'text', d]);
     await sleep(200);
   }
   return found;
 }
 
-/** WhatsApp ana ekranına ulaşıldı mı? */
 async function waitForHomeScreen(timeoutMs = 90000) {
-  return waitFor(
-    { text: 'Chats' },
-    timeoutMs
-  ) || waitFor(
-    { 'resource-id': `${WA_PACKAGE}:id/home_tab_layout` },
-    timeoutMs
-  );
+  return waitFor({ text: 'Chats' }, timeoutMs) || waitFor({ 'resource-id': `${WA_PACKAGE}:id/home_tab_layout` }, timeoutMs);
 }
 
-/** Profil kurulum ekranlarını atla */
 async function skipProfileSetup() {
   for (const t of [{ text: 'Skip' }, { text: 'Not now' }, { text: 'Later' }]) {
     await tapIf(t);
@@ -319,12 +435,7 @@ async function skipProfileSetup() {
   }
 }
 
-/**
- * Linked Devices → Link a Device → Link with phone number
- * Pairing code'u gir
- */
 async function linkWithPairingCode(pairingCode) {
-  // Ayarlar menüsüne git
   await tapIf({ 'content-desc': 'More options' }) || await tapIf({ 'content-desc': 'Menu' });
   await sleep(1000);
   await tapIf({ text: 'Settings' }) || await tapIf({ text: 'SETTINGS' });
@@ -336,98 +447,92 @@ async function linkWithPairingCode(pairingCode) {
   await tapIf({ text: 'Link a device' }) || await tapIf({ text: 'LINK A DEVICE' });
   await sleep(2000);
 
-  // QR yerine telefon numarasıyla bağlan seçeneği
-  await tapIf({ text: 'Link with phone number' })
-    || await tapIf({ text: 'Use phone number instead' });
+  await tapIf({ text: 'Link with phone number' }) || await tapIf({ text: 'Use phone number instead' });
   await sleep(2000);
 
-  // Pairing code giriş alanı
-  await tapIf({ 'class': 'android.widget.EditText' });
+  await tapIf({ class: 'android.widget.EditText' });
   await sleep(300);
-  const clean = pairingCode.replace(/[^A-Z0-9]/gi, '');
-  await adbShell(`input text "${clean}"`);
+
+  const clean = String(pairingCode || '').replace(/[^A-Z0-9]/gi, '');
+  await adbShell(['input', 'text', clean]);
   await sleep(500);
 
-  // Onayla
   await tapIf({ text: 'Link' }) || await tapIf({ text: 'OK' }) || await tapIf({ text: 'Connect' });
   await sleep(3000);
 }
 
-// ── Proxy yönetimi ────────────────────────────────────────────────────────────
-
-/**
- * Android global HTTP proxy'sini ayarla.
- * proxyStr: "host:port" veya "http://user:pass@host:port"
- */
-async function setAndroidProxy(proxyStr) {
-  if (!proxyStr) return;
-  try {
-    let host, port;
-    if (proxyStr.includes('://')) {
-      const u = new URL(proxyStr);
-      host = u.hostname;
-      port = u.port || 8080;
-    } else {
-      [host, port] = proxyStr.split(':');
-    }
-    await adbShell(`settings put global http_proxy ${host}:${port}`);
-    console.log(`[PROXY] Ayarlandı: ${host}:${port}`);
-  } catch (e) {
-    console.warn('[PROXY] Ayarlanamadı:', e.message);
-  }
+async function setAndroidProxy(proxyConfig) {
+  if (!proxyConfig) return;
+  await adbShell(['settings', 'put', 'global', 'http_proxy', `${proxyConfig.host}:${proxyConfig.port}`]);
 }
 
-/** Android global proxy'yi temizle */
 async function clearAndroidProxy() {
   try {
-    await adbShell('settings put global http_proxy :0');
-    console.log('[PROXY] Temizlendi');
+    await adbShell(['settings', 'put', 'global', 'http_proxy', ':0']);
   } catch {}
 }
 
-// ── Yardımcı: telefon numarası normalize ─────────────────────────────────────
-
-function parsePhone(phone) {
-  const withPlus = phone.startsWith('+') ? phone : '+' + phone.replace(/^00/, '');
-  try {
-    const p = parsePhoneNumber(withPlus);
-    return { normalPhone: p.number.replace('+', ''), countryCode: String(p.countryCallingCode), nationalNumber: p.nationalNumber };
-  } catch {
-    const digits = phone.replace(/\D/g, '');
-    return { normalPhone: digits, countryCode: '90', nationalNumber: digits.slice(2) };
+function requireInternalAuth(req, res, next) {
+  if (req.path === '/health') return next();
+  const token = req.headers['x-registrar-token'];
+  if (!token || token !== REGISTRAR_INTERNAL_TOKEN) {
+    return res.status(401).json({ error: 'Yetkisiz erişim.' });
   }
+  return next();
 }
 
-// ── API Endpoint'leri ─────────────────────────────────────────────────────────
+app.use(requireInternalAuth);
 
-/**
- * POST /register/start
- * { phone: "+905321234567" }
- * → BlueStacks'te WhatsApp açılır, numara girilir, SMS gönderilir
- */
+const registerLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 12 });
+app.use('/register/start', registerLimiter);
+app.use('/register/verify', registerLimiter);
+
 app.post('/register/start', async (req, res) => {
-  const { phone, proxy } = req.body;
-  if (!phone) return res.status(400).json({ error: 'phone zorunlu (örn: +905321234567)' });
+  const { phone, proxy } = req.body || {};
 
-  const { normalPhone, countryCode, nationalNumber } = parsePhone(phone);
-  const instanceName = 'wa_' + normalPhone;
+  const parsedPhone = parsePhone(phone);
+  if (!parsedPhone) {
+    return res.status(400).json({ error: 'Geçerli bir telefon numarası girin (örn: +905321234567).' });
+  }
 
-  console.log(`[KAYIT] Başlıyor: ${normalPhone} CC:${countryCode} NR:${nationalNumber}${proxy ? ' | PROXY: ' + proxy : ''}`);
+  const proxyConfig = parseProxyInput(proxy);
+  if (proxyConfig?.error) {
+    return res.status(400).json({ error: proxyConfig.error });
+  }
+
+  const { normalPhone, countryCode, nationalNumber } = parsedPhone;
+  const maskedPhone = maskPhone(normalPhone);
+  const instanceName = `wa_${normalPhone}`;
+
+  const activeSession = getSession(normalPhone);
+  if (activeSession && ['starting', 'sms_sent', 'verifying'].includes(activeSession.state)) {
+    return res.status(409).json({ error: 'Bu numara için zaten aktif bir kayıt oturumu var.' });
+  }
+
+  if (!acquireLock(normalPhone, 'start')) {
+    return res.status(423).json({ error: 'Cihaz şu anda başka bir kayıt işlemiyle meşgul.' });
+  }
+
+  setSession(normalPhone, {
+    state: 'starting',
+    countryCode,
+    nationalNumber,
+    instanceName,
+    proxyApplied: Boolean(proxyConfig),
+  });
 
   try {
-    // ADB bağlantı kontrolü
     const connected = await adbConnect();
     if (!connected || !(await deviceReady())) {
+      finalizeSession(normalPhone, 'failed');
+      releaseLock(normalPhone);
       return res.status(503).json({
         error: 'BlueStacks ADB bağlantısı kurulamadı.',
-        hint: 'BlueStacks açık mı? ADB etkin mi? (BlueStacks → Tercihler → Gelişmiş → ADB etkinleştir)',
+        hint: 'BlueStacks açık mı ve ADB etkin mi kontrol edin.',
       });
     }
 
-    // Proxy varsa Android'e uygula
-    if (proxy) await setAndroidProxy(proxy);
-
-    sessions[normalPhone] = { state: 'starting', countryCode, nationalNumber, instanceName, proxy };
+    if (proxyConfig) await setAndroidProxy(proxyConfig);
 
     await resetAndLaunchWhatsApp();
     await dismissWelcomeScreens();
@@ -436,127 +541,139 @@ app.post('/register/start', async (req, res) => {
     await clickNext();
     await confirmPhoneNumber();
 
-    sessions[normalPhone].state = 'sms_sent';
-    console.log(`[KAYIT] SMS gönderildi: ${normalPhone}`);
+    setSession(normalPhone, { state: 'sms_sent' });
+    refreshLock(normalPhone, 'sms_sent');
 
-    res.json({
+    console.log(`[KAYIT] SMS gönderildi: ${maskedPhone}`);
+
+    return res.json({
       success: true,
       phone: normalPhone,
       instanceName,
-      proxy: proxy || null,
       message: 'WhatsApp başlatıldı, SMS kodu gönderildi. Kodu girin.',
     });
-
   } catch (err) {
-    console.error(`[KAYIT HATA] ${normalPhone}:`, err.message);
+    console.error(`[KAYIT HATA] ${maskedPhone}: ${sanitizeErrorMessage(err)}`);
     await clearAndroidProxy();
+    finalizeSession(normalPhone, 'failed');
     delete sessions[normalPhone];
-    res.status(500).json({ error: err.message });
+    releaseLock(normalPhone);
+    return res.status(500).json({ error: 'Kayıt başlatılamadı.' });
   }
 });
 
-/**
- * POST /register/verify
- * { phone: "+905321234567", code: "123456" }
- * → Kodu girer, kaydı tamamlar, Evolution instance oluşturur + pairing code ile bağlar
- */
 app.post('/register/verify', async (req, res) => {
-  const { phone, code } = req.body;
-  if (!phone || !code) return res.status(400).json({ error: 'phone ve code zorunlu' });
+  const { phone, code } = req.body || {};
 
-  const { normalPhone } = parsePhone(phone);
-  const session = sessions[normalPhone];
-  if (!session) return res.status(404).json({ error: 'Aktif oturum yok. Önce /register/start çağırın.' });
+  const parsedPhone = parsePhone(phone);
+  if (!parsedPhone) {
+    return res.status(400).json({ error: 'Geçerli bir telefon numarası girin.' });
+  }
+  if (!isValidCode(String(code || ''))) {
+    return res.status(400).json({ error: 'Doğrulama kodu 4-8 haneli olmalıdır.' });
+  }
 
-  console.log(`[KAYIT] Kod doğrulama: ${normalPhone} → ${code}`);
+  const { normalPhone } = parsedPhone;
+  const maskedPhone = maskPhone(normalPhone);
+  const session = getSession(normalPhone);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Aktif oturum yok. Önce /register/start çağırın.' });
+  }
+
+  if (!deviceLock || deviceLock.phone !== normalPhone) {
+    return res.status(423).json({ error: 'Cihaz bu oturuma ait değil veya oturum süresi doldu.' });
+  }
+
+  let success = false;
+  let pairingCode = null;
 
   try {
-    session.state = 'verifying';
+    setSession(normalPhone, { state: 'verifying' });
+    refreshLock(normalPhone, 'verifying');
 
-    await enterSmsCode(code);
+    await enterSmsCode(String(code));
 
     const registered = await waitForHomeScreen(90000);
     if (!registered) {
-      return res.status(400).json({
-        error: 'WhatsApp kaydı tamamlanamadı. Kod yanlış veya süresi dolmuş olabilir.',
-      });
+      return res.status(400).json({ error: 'WhatsApp kaydı tamamlanamadı. Kod yanlış veya süresi dolmuş olabilir.' });
     }
 
     await skipProfileSetup();
-    console.log(`[KAYIT] WhatsApp kaydı tamamlandı: ${normalPhone}`);
 
-    // Evolution API instance oluştur
-    let pairingCode = null;
     try {
-      await axios.post(`${EVOLUTION_URL}/instance/create`, {
+      await evoClient.post('/instance/create', {
         instanceName: session.instanceName,
         qrcode: false,
         integration: 'WHATSAPP-BAILEYS',
-      }, { headers: { apikey: EVOLUTION_API_KEY } });
+      });
 
       await sleep(2000);
 
-      // Pairing code al (Evolution API v1)
-      const r = await axios.get(`${EVOLUTION_URL}/instance/connect/${session.instanceName}`, {
-        headers: { apikey: EVOLUTION_API_KEY },
-      });
-      pairingCode = r.data?.pairingCode || r.data?.code || null;
+      const connectRes = await evoClient.get(`/instance/connect/${session.instanceName}`);
+      pairingCode = connectRes.data?.pairingCode || connectRes.data?.code || null;
     } catch (evoErr) {
-      console.warn('[EVO]', evoErr.response?.data?.message || evoErr.message);
+      console.warn(`[EVO] ${sanitizeErrorMessage(evoErr, 'Evolution bağlantı hatası')}`);
     }
 
     if (pairingCode) {
-      console.log(`[KAYIT] Pairing code bağlanıyor: ${pairingCode}`);
       await linkWithPairingCode(pairingCode);
-      session.state = 'linked';
+      setSession(normalPhone, { state: 'linked' });
     } else {
-      session.state = 'registered';
-      console.warn('[KAYIT] Pairing code alınamadı, manuel bağlantı gerekebilir.');
+      setSession(normalPhone, { state: 'registered' });
     }
 
-    // Kayıt tamamlandı — proxy'yi temizle
-    await clearAndroidProxy();
-    delete sessions[normalPhone];
+    success = true;
 
-    res.json({
+    return res.json({
       success: true,
       instanceName: session.instanceName,
       phone: normalPhone,
       pairingCode,
       message: pairingCode
         ? `Tamamlandı! "${session.instanceName}" Evolution panelinde aktif.`
-        : `WhatsApp kaydedildi. Evolution panelinden manuel QR ile bağlayın.`,
+        : 'WhatsApp kaydedildi. Evolution panelinden manuel QR ile bağlayın.',
     });
-
   } catch (err) {
-    console.error(`[KAYIT VERIFY HATA] ${normalPhone}:`, err.message);
+    console.error(`[KAYIT VERIFY HATA] ${maskedPhone}: ${sanitizeErrorMessage(err)}`);
+    return res.status(500).json({ error: 'Doğrulama tamamlanamadı.' });
+  } finally {
     await clearAndroidProxy();
-    res.status(500).json({ error: err.message });
+    finalizeSession(normalPhone, success ? 'completed' : 'failed');
+    delete sessions[normalPhone];
+    releaseLock(normalPhone);
   }
 });
 
-/** GET /adb/status — BlueStacks bağlantısını kontrol et */
 app.get('/adb/status', async (req, res) => {
   try {
     const connected = await adbConnect();
-    const ready     = connected && await deviceReady();
-    let devices     = '';
-    try { devices = (await execAsync('adb devices')).stdout; } catch {}
-    res.json({ connected, ready, device: DEVICE, devices });
+    const ready = connected && await deviceReady();
+    let devices = '';
+    try { devices = await runCommand('adb', ['devices'], 10000); } catch {}
+
+    return res.json({ connected, ready, device: DEVICE, devices });
   } catch (e) {
-    res.json({ connected: false, ready: false, error: e.message });
+    return res.json({ connected: false, ready: false, error: sanitizeErrorMessage(e) });
   }
 });
 
-/** GET /register/sessions — Aktif oturumlar */
 app.get('/register/sessions', (req, res) => {
-  res.json(Object.entries(sessions).map(([phone, s]) => ({
-    phone, instanceName: s.instanceName, state: s.state,
-  })));
+  const now = Date.now();
+  const out = Object.entries(sessions).map(([phone, s]) => ({
+    phone,
+    instanceName: s.instanceName,
+    state: s.state,
+    expiresInMs: Math.max(0, s.expiresAt - now),
+  }));
+  res.json({
+    lock: deviceLock ? { phone: deviceLock.phone, phase: deviceLock.phase, expiresInMs: Math.max(0, deviceLock.expiresAt - now) } : null,
+    sessions: out,
+  });
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', device: DEVICE }));
 
-app.listen(PORT, () =>
-  console.log(`Registrar (ADB) :${PORT} | BlueStacks hedef: ${DEVICE}`)
-);
+app.listen(PORT, () => {
+  console.log(`Registrar (ADB) :${PORT} | BlueStacks hedef: ${DEVICE}`);
+});
