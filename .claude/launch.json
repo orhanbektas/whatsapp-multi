@@ -8,6 +8,12 @@
       "port": 4000
     },
     {
+      "name": "Full Stack + Chatwoot",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "--profile", "chatwoot", "up", "--build"],
+      "port": 4000
+    },
+    {
       "name": "API Gateway (standalone)",
       "runtimeExecutable": "node",
       "runtimeArgs": ["api_gateway/index.js"],
@@ -20,16 +26,16 @@
       "port": 4001
     },
     {
-      "name": "Chatwoot UI",
-      "runtimeExecutable": "docker",
-      "runtimeArgs": ["compose", "up", "postgres", "redis", "chatwoot", "sidekiq"],
-      "port": 3000
-    },
-    {
       "name": "Evolution API",
       "runtimeExecutable": "docker",
       "runtimeArgs": ["compose", "up", "postgres", "redis", "evolution"],
       "port": 8080
+    },
+    {
+      "name": "Chatwoot UI",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "--profile", "chatwoot", "up", "postgres", "redis", "chatwoot", "sidekiq"],
+      "port": 3000
     }
   ]
 }
