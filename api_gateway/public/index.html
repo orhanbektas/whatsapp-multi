@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhatsApp Manager</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh}
+header{background:#161b22;border-bottom:1px solid #30363d;padding:16px 24px;display:flex;align-items:center;gap:12px}
+header h1{font-size:18px;font-weight:600}
+.badge{background:#238636;color:#fff;font-size:11px;padding:2px 8px;border-radius:12px}
+.container{max-width:1100px;margin:0 auto;padding:24px}
+.tabs{display:flex;gap:4px;margin-bottom:24px;border-bottom:1px solid #30363d}
+.tab{padding:10px 20px;cursor:pointer;color:#8b949e;font-size:14px;border-bottom:2px solid transparent}
+.tab.active{color:#58a6ff;border-bottom-color:#58a6ff}
+.panel{display:none}.panel.active{display:block}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;margin-bottom:16px}
+.card h3{font-size:13px;font-weight:600;margin-bottom:12px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.form-row{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+input{background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:8px 12px;border-radius:6px;font-size:14px;outline:none;flex:1;min-width:160px}
+input:focus{border-color:#58a6ff}
+button{padding:8px 18px;border:none;border-radius:6px;font-size:14px;cursor:pointer;font-weight:500}
+.btn-green{background:#238636;color:#fff}.btn-green:hover{background:#2ea043}
+.btn-red{background:#da3633;color:#fff}.btn-red:hover{background:#f85149}
+.btn-grey{background:#21262d;color:#e6edf3;border:1px solid #30363d}.btn-grey:hover{background:#30363d}
+.btn-blue{background:#1f6feb;color:#fff}.btn-blue:hover{background:#388bfd}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.dot-green{background:#3fb950}.dot-red{background:#f85149}.dot-yellow{background:#d29922}.dot-grey{background:#484f58}
+.alert{padding:12px 16px;border-radius:6px;margin:10px 0;font-size:13px}
+.info{background:#0c2d6b;border:1px solid #1f6feb;color:#79c0ff}
+.success{background:#0a3622;border:1px solid #238636;color:#56d364}
+.error{background:#490202;border:1px solid #da3633;color:#ffa198}
+.warn{background:#272115;border:1px solid #9e6a03;color:#e3b341}
+.progress{height:4px;background:#30363d;border-radius:2px;overflow:hidden;margin:8px 0;display:none}
+.progress-bar{height:100%;background:#238636;border-radius:2px;transition:width .3s}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 12px;color:#8b949e;border-bottom:1px solid #30363d;font-weight:500}
+td{padding:8px 12px;border-bottom:1px solid #21262d;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.empty{text-align:center;color:#484f58;padding:32px;font-size:14px}
+code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+
+<header>
+  <span style="font-size:22px">💬</span>
+  <h1>WhatsApp Manager</h1>
+  <span class="badge">BlueStacks ADB</span>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px;font-size:13px">
+    <span class="dot dot-grey" id="adbDot"></span>
+    <span id="adbText">BlueStacks kontrol ediliyor...</span>
+    <button class="btn-grey" style="padding:4px 10px;font-size:12px" onclick="checkAdb()">Test</button>
+  </div>
+</header>
+
+<div class="container">
+  <div class="tabs">
+    <div class="tab active" onclick="tab('register')">📱 Yeni Numara Ekle</div>
+    <div class="tab" onclick="tab('instances')">📋 Aktif Numaralar</div>
+    <div class="tab" onclick="tab('qr')">📷 QR ile Bağla</div>
+  </div>
+
+  <!-- TAB 1: Yeni Numara -->
+  <div class="panel active" id="panel-register">
+    <div class="card">
+      <h3>Ön Koşul — BlueStacks ADB</h3>
+      <div class="alert info">
+        BlueStacks açık olmalı ve ADB etkin olmalı.<br>
+        <strong>Ayar:</strong> BlueStacks ⚙ → Gelişmiş → "Android Hata Ayıklama (ADB)" → Etkinleştir<br>
+        Varsayılan ADB portu: <code>5555</code>
+      </div>
+    </div>
+
+    <div class="card" id="step1Card">
+      <h3>Adım 1 — Telefon Numarası Gir</h3>
+      <p style="color:#8b949e;font-size:13px;margin-bottom:14px">
+        WhatsApp kurulmamış şirket numarasını gir. BlueStacks'te otomatik kayıt başlatılır.
+      </p>
+      <div class="form-row">
+        <input type="tel" id="regPhone" placeholder="+905321234567" style="max-width:200px">
+        <input type="text" id="regProxy" placeholder="Proxy: host:port (opsiyonel)" style="max-width:240px">
+        <button class="btn-green" onclick="startReg()">Kayıt Başlat</button>
+      </div>
+      <div class="progress" id="p1"><div class="progress-bar" id="b1" style="width:0%"></div></div>
+      <div id="r1"></div>
+    </div>
+
+    <div class="card" id="step2Card" style="display:none">
+      <h3>Adım 2 — SMS Kodunu Gir</h3>
+      <p style="color:#8b949e;font-size:13px;margin-bottom:14px">
+        Telefona gelen 6 haneli kodu gir. BlueStacks'te WhatsApp otomatik onaylayacak.
+      </p>
+      <div class="form-row">
+        <input type="text" id="smsCode" placeholder="123456" maxlength="6"
+          style="max-width:140px;font-size:20px;letter-spacing:8px;text-align:center"
+          oninput="this.value=this.value.replace(/\D/g,'')">
+        <button class="btn-green" onclick="verifyCode()">Onayla</button>
+      </div>
+      <div class="progress" id="p2"><div class="progress-bar" id="b2" style="width:0%"></div></div>
+      <div id="r2"></div>
+    </div>
+
+    <div class="card" id="step3Card" style="display:none">
+      <h3>Tamamlandı</h3>
+      <div class="alert success" id="r3"></div>
+      <button class="btn-grey" onclick="resetForm()" style="margin-top:8px">Yeni Numara Ekle</button>
+    </div>
+  </div>
+
+  <!-- TAB 2: Aktif Numaralar -->
+  <div class="panel" id="panel-instances">
+    <div class="card">
+      <h3>Aktif WhatsApp Numaraları</h3>
+      <button class="btn-grey" onclick="loadInstances()" style="margin-bottom:14px">Yenile</button>
+      <div id="instanceList"><div class="empty">Yükleniyor...</div></div>
+    </div>
+  </div>
+
+  <!-- TAB 3: QR -->
+  <div class="panel" id="panel-qr">
+    <div class="card">
+      <h3>Mevcut Hesabı QR ile Bağla</h3>
+      <p style="color:#8b949e;font-size:13px;margin-bottom:14px">
+        Zaten WhatsApp kurulu bir numarayı bağlamak için kullan.
+      </p>
+      <div class="form-row">
+        <input type="text" id="qrName" placeholder="instance-adi (örn: firma1)">
+        <button class="btn-blue" onclick="createQr()">Instance Oluştur + QR Al</button>
+      </div>
+      <div id="qrResult" style="margin-top:16px"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let curPhone = null;
+
+function tab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => {
+    t.classList.toggle('active', ['register','instances','qr'][i] === name);
+  });
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-'+name).classList.add('active');
+  if (name === 'instances') loadInstances();
+}
+
+async function checkAdb() {
+  document.getElementById('adbText').textContent = 'Test ediliyor...';
+  try {
+    const d = await (await fetch('/panel/register/adb-status')).json();
+    const dot = document.getElementById('adbDot');
+    const txt = document.getElementById('adbText');
+    if (d.ready) { dot.className='dot dot-green'; txt.textContent='BlueStacks bağlı'; }
+    else if (d.connected) { dot.className='dot dot-yellow'; txt.textContent='ADB bağlı, hazırlanıyor'; }
+    else { dot.className='dot dot-red'; txt.textContent='BlueStacks bağlanamadı'; }
+    return d;
+  } catch {
+    document.getElementById('adbDot').className='dot dot-grey';
+    document.getElementById('adbText').textContent='Registrar servisi kapalı';
+    return null;
+  }
+}
+
+async function startReg() {
+  const phone = document.getElementById('regPhone').value.trim();
+  const proxy = document.getElementById('regProxy').value.trim();
+  if (!phone) return alert('Numara girin!');
+  setResult('r1','<div class="alert info">BlueStacks\'te WhatsApp başlatılıyor... (30–60 sn)</div>');
+  animBar('p1','b1', 80, 50000);
+  try {
+    const body = { phone };
+    if (proxy) body.proxy = proxy;
+    const d = await post('/panel/register/start', body);
+    stopBar('p1','b1');
+    if (d.success) {
+      curPhone = d.phone;
+      setResult('r1',`<div class="alert success">${d.message}</div>`);
+      document.getElementById('step2Card').style.display='block';
+      document.getElementById('smsCode').focus();
+    } else {
+      setResult('r1',`<div class="alert error">${d.error}</div>`);
+    }
+  } catch(e) { stopBar('p1','b1'); setResult('r1',`<div class="alert error">${e.message}</div>`); }
+}
+
+async function verifyCode() {
+  const code = document.getElementById('smsCode').value.trim();
+  if (code.length < 6) return alert('6 haneli kodu girin!');
+  setResult('r2','<div class="alert info">Kod doğrulanıyor, Evolution\'a bağlanıyor... (60–120 sn)</div>');
+  animBar('p2','b2', 90, 90000);
+  try {
+    const d = await post('/panel/register/verify', { phone: curPhone, code });
+    stopBar('p2','b2');
+    if (d.success) {
+      document.getElementById('step2Card').style.display='none';
+      document.getElementById('step3Card').style.display='block';
+      document.getElementById('r3').innerHTML =
+        `${d.message}<br><br>Instance: <strong>${d.instanceName}</strong>`;
+    } else {
+      setResult('r2',`<div class="alert error">${d.error}</div>`);
+    }
+  } catch(e) { stopBar('p2','b2'); setResult('r2',`<div class="alert error">${e.message}</div>`); }
+}
+
+function resetForm() {
+  curPhone=null;
+  ['regPhone','smsCode'].forEach(id=>document.getElementById(id).value='');
+  ['r1','r2','r3'].forEach(id=>setResult(id,''));
+  ['step2Card','step3Card'].forEach(id=>document.getElementById(id).style.display='none');
+}
+
+async function loadInstances() {
+  const el = document.getElementById('instanceList');
+  el.innerHTML='<div class="empty">Yükleniyor...</div>';
+  try {
+    const list = await (await fetch('/panel/instances')).json();
+    if (!list.length) { el.innerHTML='<div class="empty">Kayıtlı numara yok.</div>'; return; }
+    el.innerHTML=`<table><thead><tr><th>Instance</th><th>Durum</th><th></th></tr></thead><tbody>
+      ${list.map(i=>`<tr>
+        <td><strong>${i.name}</strong></td>
+        <td><span class="dot ${dotCls(i.connectionStatus)}"></span>${i.connectionStatus}</td>
+        <td><button class="btn-red" style="padding:3px 10px;font-size:12px"
+          onclick="delInstance('${i.name}')">Sil</button></td>
+      </tr>`).join('')}</tbody></table>`;
+  } catch(e) { el.innerHTML=`<div class="alert error">${e.message}</div>`; }
+}
+
+function dotCls(s) {
+  if (!s) return 'dot-grey';
+  s=s.toLowerCase();
+  if (s==='open'||s==='connected') return 'dot-green';
+  if (s==='connecting') return 'dot-yellow';
+  return 'dot-red';
+}
+
+async function delInstance(name) {
+  if (!confirm(`"${name}" silinsin mi?`)) return;
+  await fetch(`/panel/instances/${name}`,{method:'DELETE'});
+  loadInstances();
+}
+
+async function createQr() {
+  const name = document.getElementById('qrName').value.trim();
+  if (!name) return alert('Instance adı girin!');
+  const el = document.getElementById('qrResult');
+  el.innerHTML='<div class="alert info">Oluşturuluyor...</div>';
+  try {
+    await post('/panel/instances',{instanceName:name});
+    await sleep(2000);
+    const d = await (await fetch(`/panel/instances/${name}/qr`)).json();
+    if (d.base64) {
+      el.innerHTML=`<p style="color:#8b949e;font-size:13px;margin-bottom:10px">
+        WhatsApp → Bağlı Cihazlar → Cihaz Ekle → QR Tara</p>
+        <img src="${d.base64}" style="width:240px;height:240px;border-radius:8px;border:1px solid #30363d">`;
+    } else {
+      el.innerHTML=`<div class="alert warn">QR alınamadı, biraz bekleyip tekrar deneyin.<br><code>${JSON.stringify(d)}</code></div>`;
+    }
+  } catch(e) { el.innerHTML=`<div class="alert error">${e.message}</div>`; }
+}
+
+// Yardımcılar
+async function post(url, body) {
+  const r = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  return r.json();
+}
+function setResult(id, html) { document.getElementById(id).innerHTML=html; }
+function sleep(ms) { return new Promise(r=>setTimeout(r,ms)); }
+
+let barTimers = {};
+function animBar(pid, bid, target, ms) {
+  document.getElementById(pid).style.display='block';
+  const bar=document.getElementById(bid); let pct=0;
+  const step=target/(ms/200);
+  barTimers[bid]=setInterval(()=>{ pct=Math.min(pct+step,target); bar.style.width=pct+'%'; if(pct>=target)clearInterval(barTimers[bid]); },200);
+}
+function stopBar(pid, bid) {
+  clearInterval(barTimers[bid]);
+  document.getElementById(bid).style.width='100%';
+  setTimeout(()=>{ document.getElementById(pid).style.display='none'; document.getElementById(bid).style.width='0%'; },500);
+}
+
+checkAdb();
+setInterval(checkAdb, 20000);
+</script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+# version: '3.8'  # obsolete, removed
+
+networks:
+  wm_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  evolution_data:
+  chatwoot_storage:
+
+services:
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: wm_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme123}
+      POSTGRES_DB: chatwoot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - wm_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: wm_redis
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redispass123}
+    volumes:
+      - redis_data:/data
+    networks:
+      - wm_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispass123}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  evolution:
+    image: atendai/evolution-api:v1.8.7
+    container_name: wm_evolution
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      SERVER_URL: ${EVOLUTION_SERVER_URL:-http://localhost:8080}
+      AUTHENTICATION_TYPE: apikey
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-evokey_changeme}
+      AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: "true"
+      QRCODE_LIMIT: "30"
+      QRCODE_EXPIRATION_TIME: "60"
+      DEL_INSTANCE: "false"
+      LOG_LEVEL: ERROR
+      LOG_COLOR: "false"
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/evolution
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      REDIS_ENABLED: "true"
+      REDIS_URI: redis://:${REDIS_PASSWORD:-redispass123}@redis:6379
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://:${REDIS_PASSWORD:-redispass123}@redis:6379
+      CACHE_REDIS_PREFIX_KEY: evolution
+      WEBHOOK_GLOBAL_ENABLED: "false"
+    volumes:
+      - evolution_data:/evolution/instances
+    networks:
+      - wm_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  chatwoot:
+    image: chatwoot/chatwoot:latest
+    container_name: wm_chatwoot
+    restart: always
+    profiles: ["chatwoot"]        # docker compose --profile chatwoot up ile başlatılır
+    ports:
+      - "3000:3000"
+    environment:
+      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY:-chatwoot_secret_changeme}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/chatwoot
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass123}@redis:6379
+      RAILS_ENV: production
+      NODE_ENV: production
+      INSTALLATION_ENV: docker
+      FRONTEND_URL: ${CHATWOOT_URL:-http://localhost:3000}
+      DEFAULT_URL_HOST: ${CHATWOOT_HOST:-localhost:3000}
+    command: bundle exec rails s -p 3000 -b 0.0.0.0
+    volumes:
+      - chatwoot_storage:/app/storage
+    networks:
+      - wm_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  sidekiq:
+    image: chatwoot/chatwoot:latest
+    container_name: wm_sidekiq
+    restart: always
+    profiles: ["chatwoot"]        # docker compose --profile chatwoot up ile başlatılır
+    environment:
+      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY:-chatwoot_secret_changeme}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/chatwoot
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass123}@redis:6379
+      RAILS_ENV: production
+      NODE_ENV: production
+      FRONTEND_URL: ${CHATWOOT_URL:-http://localhost:3000}
+      DEFAULT_URL_HOST: ${CHATWOOT_HOST:-localhost:3000}
+    command: bundle exec sidekiq -C config/sidekiq.yml
+    volumes:
+      - chatwoot_storage:/app/storage
+    networks:
+      - wm_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  registrar:
+    image: node:20-alpine
+    container_name: wm_registrar
+    restart: always
+    ports:
+      - "4001:4001"
+    environment:
+      EVOLUTION_URL: http://evolution:8080
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:-evokey_changeme}
+      PORT: 4001
+      # BlueStacks ADB bağlantısı (Windows host üzerinde BlueStacks çalışır)
+      ADB_HOST: ${ADB_HOST:-host.docker.internal}
+      ADB_PORT: ${ADB_PORT:-5555}
+      # WhatsApp paketi: com.whatsapp.w4b (Business) veya com.whatsapp (normal)
+      WA_PACKAGE: ${WA_PACKAGE:-com.whatsapp}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux için gerekli, Windows Docker Desktop'ta otomatik
+    volumes:
+      - ./registrar:/app
+    working_dir: /app
+    command: sh -c "apk add --no-cache android-tools && npm install && node index.js"
+    networks:
+      - wm_net
+    depends_on:
+      - evolution
+
+  gateway:
+    image: node:20-alpine
+    container_name: wm_gateway
+    restart: always
+    ports:
+      - "4000:4000"
+    environment:
+      EVOLUTION_URL: http://evolution:8080
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:-evokey_changeme}
+      GATEWAY_API_KEYS: ${GATEWAY_API_KEYS:-key_changeme}
+      REGISTRAR_URL: http://registrar:4001
+      PORT: 4000
+    volumes:
+      - ./api_gateway:/app
+    working_dir: /app
+    command: sh -c "npm install && node index.js"
+    networks:
+      - wm_net
+    depends_on:
+      - evolution
+      - registrar

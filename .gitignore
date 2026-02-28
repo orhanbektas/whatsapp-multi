@@ -1,0 +1,16 @@
+# Environment variables (sensitive data)
+.env
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (local)
+postgres_data/
+redis_data/
+evolution_data/
+chatwoot_storage/
