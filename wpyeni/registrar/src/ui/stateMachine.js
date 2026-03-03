@@ -5,6 +5,7 @@ const STATE = Object.freeze({
   CUSTOM_ROM_ALERT: 'custom_rom_alert',
   WELCOME: 'welcome',
   PHONE_INPUT: 'phone_input',
+  NOTIFICATION_PROMPT: 'notification_prompt',
   OTP_VERIFY: 'otp_verify',
   HOME: 'home',
   BLOCKED_QR: 'blocked_qr',
@@ -57,6 +58,7 @@ function detectState(xml) {
 
   if (isStrongHomeState(x)) return STATE.HOME;
   if (isStrongOtpState(x)) return STATE.OTP_VERIFY;
+  if (hasAny(x, stateSelectors.notificationPrompt.idAny) || hasAny(x, stateSelectors.notificationPrompt.textAny)) return STATE.NOTIFICATION_PROMPT;
   if (hasAny(x, stateSelectors.phoneInput.idAny) || hasAny(x, stateSelectors.phoneInput.textAny)) return STATE.PHONE_INPUT;
   if (hasAny(x, stateSelectors.customRomAlert.idAny) || hasAny(x, stateSelectors.customRomAlert.textAny)) return STATE.CUSTOM_ROM_ALERT;
   if (hasAny(x, stateSelectors.welcome.idAny) || hasAny(x, stateSelectors.welcome.textAny)) return STATE.WELCOME;

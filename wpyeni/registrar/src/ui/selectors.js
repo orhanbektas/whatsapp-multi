@@ -23,6 +23,18 @@ const stateSelectors = {
       `${WA_PACKAGE}:id/registration_submit`,
     ],
   },
+  notificationPrompt: {
+    textAny: [
+      'allow whatsapp to send notifications',
+      'allow notifications',
+      'would you like whatsapp to send notifications',
+      'whatsapp bildirim göndersin mi',
+      'bildirimlere izin ver',
+    ],
+    idAny: ['com.android.permissioncontroller:id/permission_message'],
+    allowTextAny: ['allow', 'izin ver', 'ok'],
+    denyTextAny: ['don\'t allow', 'allow only while using the app', 'izin verme', 'şimdi değil', 'not now'],
+  },
   otpVerify: {
     textAny: ['enter code', 'verification code', 'verification', 'sms', 'kod', 'we sent an sms'],
     idAny: [

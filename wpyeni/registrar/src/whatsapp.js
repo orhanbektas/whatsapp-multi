@@ -168,6 +168,17 @@ function createWhatsAppFlow({
     return tapFallback(deviceSerial, 0.5, 0.93);
   }
 
+  async function handleNotificationPrompt(deviceSerial) {
+    const allowByText = await tapFirstMatchingText(deviceSerial, stateSelectors.notificationPrompt.allowTextAny);
+    if (allowByText) return { handled: true, choice: 'allow' };
+
+    const denyByText = await tapFirstMatchingText(deviceSerial, stateSelectors.notificationPrompt.denyTextAny);
+    if (denyByText) return { handled: true, choice: 'deny' };
+
+    const fallback = await tapFallback(deviceSerial, 0.72, 0.86);
+    return { handled: fallback, choice: fallback ? 'fallback' : 'none' };
+  }
+
   async function driveToPhoneInput(deviceSerial, { maxSteps = 12 } = {}) {
     const traces = [];
 
@@ -202,6 +213,16 @@ function createWhatsAppFlow({
           state: evidence.state,
           traces,
         };
+      }
+
+      if (evidence.state === STATE.NOTIFICATION_PROMPT) {
+        const prompt = await handleNotificationPrompt(deviceSerial);
+        traces.push({
+          step,
+          state: 'notification_prompt_handled',
+          promptChoice: prompt.choice,
+        });
+        continue;
       }
 
       if (evidence.state === STATE.CUSTOM_ROM_ALERT) {
